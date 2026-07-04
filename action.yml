@@ -1,0 +1,90 @@
+name: "SOFE Evaluate"
+description: "Run SOFE FinOps policy evaluations on your AWS account. Detect idle resources, enforce tagging, and estimate savings."
+author: "breakingthecloud"
+
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  api-key:
+    description: "SOFE API key (sk_sofe_xxx). Get one at platform.sofe.dev"
+    required: true
+  fail-on:
+    description: "Fail the workflow if findings at or above severity (critical|high|medium|low)"
+    required: false
+    default: ""
+  resource-types:
+    description: "Comma-separated resource types to evaluate (e.g., aws.ec2,aws.s3)"
+    required: false
+    default: ""
+  format:
+    description: "Output format: table, json, or markdown"
+    required: false
+    default: "table"
+  version:
+    description: "SOFE CLI version to install (default: latest)"
+    required: false
+    default: "latest"
+
+outputs:
+  findings-count:
+    description: "Number of findings detected"
+  resources-scanned:
+    description: "Number of AWS resources scanned"
+  failed:
+    description: "Whether the evaluation failed (based on fail-on threshold)"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install SOFE CLI
+      shell: bash
+      run: |
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          curl -fsSL https://sofe.dev/install.sh | bash
+        else
+          VERSION="${{ inputs.version }}"
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          case "$ARCH" in x86_64) ARCH="amd64" ;; aarch64|arm64) ARCH="arm64" ;; esac
+          curl -fsSL "https://github.com/breakingthecloud/sofe-cli/releases/download/v${VERSION}/sofe_${VERSION}_${OS}_${ARCH}.tar.gz" -o sofe.tar.gz
+          tar -xzf sofe.tar.gz
+          sudo mv sofe /usr/local/bin/sofe
+          rm sofe.tar.gz
+        fi
+        sofe --version
+
+    - name: Run evaluation
+      id: evaluate
+      shell: bash
+      env:
+        SOFE_API_KEY: ${{ inputs.api-key }}
+      run: |
+        ARGS="--cloud --format ${{ inputs.format }}"
+
+        if [ -n "${{ inputs.fail-on }}" ]; then
+          ARGS="$ARGS --fail-on ${{ inputs.fail-on }}"
+        fi
+
+        if [ -n "${{ inputs.resource-types }}" ]; then
+          ARGS="$ARGS --resource-types ${{ inputs.resource-types }}"
+        fi
+
+        echo "🔍 Running: sofe evaluate $ARGS"
+        OUTPUT=$(sofe evaluate $ARGS 2>&1) || EXIT_CODE=$?
+        echo "$OUTPUT"
+
+        # Parse findings count from output
+        FINDINGS=$(echo "$OUTPUT" | grep -oP '⚡ \K\d+' || echo "0")
+        RESOURCES=$(echo "$OUTPUT" | grep -oP '\d+(?= resources scanned)' || echo "0")
+
+        echo "findings-count=$FINDINGS" >> $GITHUB_OUTPUT
+        echo "resources-scanned=$RESOURCES" >> $GITHUB_OUTPUT
+
+        if [ "${EXIT_CODE:-0}" -ne 0 ]; then
+          echo "failed=true" >> $GITHUB_OUTPUT
+          exit 1
+        else
+          echo "failed=false" >> $GITHUB_OUTPUT
+        fi

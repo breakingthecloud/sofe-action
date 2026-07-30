@@ -1,5 +1,8 @@
 # SOFE Evaluate — GitHub Action
 
+[![GitHub Marketplace](https://img.shields.io/badge/Marketplace-SOFE%20Evaluate-6C2D82)](https://github.com/marketplace/actions/sofe-evaluate)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 > Run FinOps policy evaluations in CI/CD. Two modes:
 > - **Cloud mode**: Scan live AWS resources for idle resources, tagging violations, and savings
 > - **Terraform mode**: Scan `tfplan.json` pre-deploy to catch policy violations before `terraform apply`

@@ -136,16 +136,25 @@ runs:
       shell: bash
       run: |
         if [ "${{ inputs.version }}" = "latest" ]; then
+          # install.sh verifies the SHA-256 checksum against checksums.txt
           curl -fsSL https://sofe.dev/install.sh | bash
         else
+          set -euo pipefail
           VERSION="${{ inputs.version }}"
           OS=$(uname -s | tr '[:upper:]' '[:lower:]')
           ARCH=$(uname -m)
           case "$ARCH" in x86_64) ARCH="amd64" ;; aarch64|arm64) ARCH="arm64" ;; esac
+          curl -fsSL "https://github.com/breakingthecloud/sofe-cli/releases/download/v${VERSION}/checksums.txt" -o checksums.txt
           curl -fsSL "https://github.com/breakingthecloud/sofe-cli/releases/download/v${VERSION}/sofe_${VERSION}_${OS}_${ARCH}.tar.gz" -o sofe.tar.gz
+          EXPECTED=$(grep "sofe_${VERSION}_${OS}_${ARCH}.tar.gz" checksums.txt | awk '{print $1}' | head -1)
+          ACTUAL=$(sha256sum sofe.tar.gz | awk '{print $1}')
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "❌ Checksum mismatch. Expected $EXPECTED, got $ACTUAL" >&2
+            exit 1
+          fi
           tar -xzf sofe.tar.gz
           sudo mv sofe /usr/local/bin/sofe
-          rm sofe.tar.gz
+          rm sofe.tar.gz checksums.txt
         fi
         sofe --version
 

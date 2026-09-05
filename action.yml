@@ -1,5 +1,5 @@
 name: "SOFE Evaluate"
-description: "Run SOFE FinOps policy evaluations — scan live AWS resources or Terraform plans pre-deploy."
+description: "Run SOFE FinOps policy evaluations — scan live AWS resources or Terraform plans pre-deploy, or open a remediation PR."
 author: "breakingthecloud"
 
 branding:
@@ -11,13 +11,33 @@ inputs:
     description: "SOFE API key (sk_sofe_xxx) or Bearer token. Get one at platform.sofe.dev"
     required: true
   mode:
-    description: "Evaluation mode: 'cloud' (scan live AWS resources) or 'terraform' (scan plan file)"
+    description: "Evaluation mode: 'cloud' (scan live AWS resources), 'terraform' (scan plan file), or 'remediation' (open a PR with fixes)"
     required: false
     default: "cloud"
   plan-file:
     description: "Path to tfplan.json file (required when mode=terraform)"
     required: false
     default: ""
+  eval-id:
+    description: "Evaluation ID to remediate (required when mode=remediation)"
+    required: false
+    default: ""
+  base-path:
+    description: "Repo path where the remediation .tf is written (mode=remediation)"
+    required: false
+    default: "sofe/remediation"
+  base:
+    description: "Base branch for the remediation PR (mode=remediation, default: repo default branch)"
+    required: false
+    default: ""
+  pr-title:
+    description: "PR title (mode=remediation)"
+    required: false
+    default: "SOFE remediation: apply FinOps fixes"
+  github-token:
+    description: "GitHub token with contents:write + pull-requests:write (mode=remediation, default: github.token)"
+    required: false
+    default: "${{ github.token }}"
   fail-on:
     description: "Fail the workflow if findings at or above severity (critical|high|medium|low)"
     required: false
@@ -40,12 +60,114 @@ outputs:
     description: "Number of findings detected"
   resources-scanned:
     description: "Number of resources scanned"
+  remediation-count:
+    description: "Number of remediations applied (mode=remediation)"
+  pr-number:
+    description: "Pull request number opened (mode=remediation)"
   failed:
     description: "Whether the evaluation failed (based on fail-on threshold)"
 
 runs:
   using: "composite"
   steps:
+    - name: Generate remediation module
+      if: inputs.mode == 'remediation'
+      id: remediation
+      shell: bash
+      env:
+        SOFE_API_KEY: ${{ inputs.api-key }}
+      run: |
+        EVAL_ID="${{ inputs.eval-id }}"
+
+        if [ -z "$EVAL_ID" ]; then
+          echo "❌ Error: eval-id is required when mode=remediation"
+          exit 1
+        fi
+
+        echo "🛠️ Fetching remediation plan for eval: $EVAL_ID"
+        RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $SOFE_API_KEY" \
+          "https://api.sofe.dev/evaluations/$EVAL_ID/remediation-tf")
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | sed '$d')
+
+        if [ "$HTTP_CODE" -ne 200 ]; then
+          echo "❌ API error (HTTP $HTTP_CODE): $BODY"
+          exit 1
+        fi
+
+        REMEDIATION_COUNT=$(echo "$BODY" | jq -r '.remediation_count // 0')
+        TF_CONTENT=$(echo "$BODY" | jq -r '.terraform')
+        MODULE=$(echo "$BODY" | jq -r '.module // ""')
+
+        echo "  ⚡ Remediations: $REMEDIATION_COUNT"
+        echo "  📦 Module: $MODULE"
+
+        if [ "$REMEDIATION_COUNT" -eq 0 ]; then
+          echo "  ✅ No remediations needed — skipping PR"
+          echo "remediation-count=0" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        BASE_PATH="${{ inputs.base-path }}"
+        mkdir -p "${GITHUB_WORKSPACE}/${BASE_PATH}"
+        echo "$TF_CONTENT" > "${GITHUB_WORKSPACE}/${BASE_PATH}/remediation.tf"
+        echo "  📄 Written to ${BASE_PATH}/remediation.tf"
+
+        echo "remediation-count=$REMEDIATION_COUNT" >> $GITHUB_OUTPUT
+
+    - name: Open remediation PR
+      if: inputs.mode == 'remediation' && steps.remediation.outputs.remediation-count != '0'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const fs = require('fs');
+          const basePath = core.getInput('base-path') || 'sofe/remediation';
+          const evalId = core.getInput('eval-id');
+          const prTitle = core.getInput('pr-title');
+          const base = core.getInput('base') || context.payload.repository?.default_branch || 'main';
+          const branch = `sofe/remediation-${evalId}`;
+          const tfPath = `${basePath}/remediation.tf`;
+
+          const content = fs.readFileSync(tfPath, 'utf8');
+          const { owner, repo } = context.repo;
+
+          // 1. Base branch SHA
+          let baseSha;
+          try {
+            baseSha = (await github.rest.git.getRef({ owner, repo, ref: `heads/${base}` })).data.object.sha;
+          } catch (e) {
+            throw new Error(`Base branch '${base}' not found: ${e.message}`);
+          }
+
+          // 2. Reset branch, then recreate from base
+          try {
+            await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` });
+          } catch (e) {}
+          await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: baseSha });
+
+          // 3. Commit the remediation module
+          const blob = (await github.rest.git.createBlob({ owner, repo, content })).data.sha;
+          const tree = (await github.rest.git.createTree({ owner, repo, base_tree: baseSha, tree: [{ path: tfPath, mode: '100644', type: 'blob', sha: blob }] })).data.sha;
+          const commit = (await github.rest.git.createCommit({ owner, repo, message: `SOFE remediation: apply FinOps fixes (eval ${evalId})`, tree, parents: [baseSha] })).data.sha;
+          await github.rest.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: commit, force: true });
+
+          // 4. Open (or reuse) the PR
+          const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${branch}`, state: 'open' });
+          let prNumber;
+          if (existing.data.length === 0) {
+            const pr = await github.rest.pulls.create({
+              owner, repo, title: prTitle, head: branch, base,
+              body: `## 🛠️ SOFE Remediation (eval \`${evalId}\`)\n\nAuto-PR con fixes Terraform generados por SOFE. **Revisa y aprueba antes de mergear** — los recursos reales solo cambian con \`terraform apply\`.\n\n- Módulo: \`${basePath}/remediation.tf\`\n- Review recomendada: S3 encryption/versioning, tags, lifecycle rules, Lambda runtime, API Gateway settings\n- Aplica con: \`terraform plan\` + \`terraform apply\` en tu pipeline\n\n<sub>Generado por [SOFE](https://sofe.dev) — remediation-as-code (S061).</sub>`,
+            });
+            prNumber = pr.data.number;
+          } else {
+            prNumber = existing.data[0].number;
+          }
+          core.setOutput('pr-number', prNumber);
+          console.log(`🔀 PR #${prNumber} ready: ${base} ← ${branch}`);
+
     - name: SOFE Terraform Scan
       if: inputs.mode == 'terraform'
       id: terraform

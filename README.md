@@ -26,9 +26,10 @@
 
 ---
 
-Catch cost violations before they reach production. Two modes:
+Catch cost violations before they reach production. Three modes:
 - **Cloud mode**: Scan live AWS resources for idle resources, tagging violations, and savings
 - **Terraform mode**: Scan `tfplan.json` pre-deploy to catch policy violations before `terraform apply`
+- **Remediation mode**: Open an auto-PR with a Terraform fix module generated from an evaluation (remediation-as-code)
 
 ```yaml
 - uses: breakingthecloud/sofe-action@v2
@@ -58,6 +59,24 @@ Catch cost violations before they reach production. Two modes:
     plan-file: tfplan.json
     fail-on: high
 ```
+
+## Quick Start — Remediation Mode
+
+Abre un auto-PR con los fixes Terraform de una evaluación. Obtén el `eval-id` desde `platform.sofe.dev/history` (o del output de un cloud scan).
+
+```yaml
+- uses: actions/checkout@v4
+- uses: breakingthecloud/sofe-action@v2
+  with:
+    api-key: ${{ secrets.SOFE_API_KEY }}
+    mode: remediation
+    eval-id: <EVAL_ID>
+    github-token: ${{ secrets.GITHUB_TOKEN }}   # contents:write + pull-requests:write
+```
+
+Resultado: rama `sofe/remediation-<eval-id>` con `sofe/remediation/remediation.tf` + PR abierto. **Revisa y aproba el PR — los recursos reales solo cambian con `terraform apply`.**
+
+Opciones: `base-path` (dónde escribir el .tf), `base` (rama base del PR), `pr-title`.
 
 ## Full Example — Terraform FinOps Gate
 

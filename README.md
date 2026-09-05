@@ -62,7 +62,7 @@ Catch cost violations before they reach production. Three modes:
 
 ## Quick Start — Remediation Mode
 
-Abre un auto-PR con los fixes Terraform de una evaluación. Obtén el `eval-id` desde `platform.sofe.dev/history` (o del output de un cloud scan).
+Abre un auto-PR con los fixes Terraform de **cualquier evaluación** (no solo la última). Copia el `eval-id` desde la URL del workflow en platform: `platform.sofe.dev/workflows/remediation?evalId=<EVAL_ID>`.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -75,6 +75,8 @@ Abre un auto-PR con los fixes Terraform de una evaluación. Obtén el `eval-id` 
 ```
 
 Resultado: rama `sofe/remediation-<eval-id>` con `sofe/remediation/remediation.tf` + PR abierto. **Revisa y aproba el PR — los recursos reales solo cambian con `terraform apply`.**
+
+Para auto-remediation programada, pega lo anterior en un workflow con `on: schedule` (cron semanal) — la página del workflow en platform te da el YAML listo con el `eval-id` ya fijado ("Copiar YAML").
 
 Opciones: `base-path` (dónde escribir el .tf), `base` (rama base del PR), `pr-title`.
 

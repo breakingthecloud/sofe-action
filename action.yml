@@ -22,6 +22,10 @@ inputs:
     description: "Evaluation ID to remediate (required when mode=remediation)"
     required: false
     default: ""
+  run-id:
+    description: "SOFE workflow run ID to report status back to (mode=remediation, optional). Get it from platform.sofe.dev/workflows"
+    required: false
+    default: ""
   base-path:
     description: "Repo path where the remediation .tf is written (mode=remediation)"
     required: false
@@ -78,6 +82,19 @@ runs:
         SOFE_API_KEY: ${{ inputs.api-key }}
       run: |
         EVAL_ID="${{ inputs.eval-id }}"
+        RUN_ID="${{ inputs.run-id }}"
+
+        report_status() {
+          STATUS="$1"
+          if [ -z "$RUN_ID" ]; then return 0; fi
+          CI_RUN_ID="${GITHUB_RUN_ID:-}"
+          CI_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}/actions/runs/${CI_RUN_ID}"
+          curl -sf -o /dev/null -X POST "https://api.sofe.dev/workflows/$RUN_ID/status" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $SOFE_API_KEY" \
+            -d "{\"status\":\"$STATUS\",\"ci_run_id\":\"$CI_RUN_ID\",\"ci_run_url\":\"$CI_URL\"}" \
+            || true
+        }
 
         if [ -z "$EVAL_ID" ]; then
           echo "❌ Error: eval-id is required when mode=remediation"
@@ -85,7 +102,10 @@ runs:
         fi
 
         echo "🛠️ Fetching remediation plan for eval: $EVAL_ID"
-        RESPONSE=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $SOFE_API_KEY" \
+        report_status running
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+          -H "Authorization: Bearer $SOFE_API_KEY" \
+          -H "X-API-Key: $SOFE_API_KEY" \
           "https://api.sofe.dev/evaluations/$EVAL_ID/remediation-tf")
 
         HTTP_CODE=$(echo "$RESPONSE" | tail -1)
@@ -93,6 +113,7 @@ runs:
 
         if [ "$HTTP_CODE" -ne 200 ]; then
           echo "❌ API error (HTTP $HTTP_CODE): $BODY"
+          report_status failed
           exit 1
         fi
 
@@ -106,6 +127,7 @@ runs:
         if [ "$REMEDIATION_COUNT" -eq 0 ]; then
           echo "  ✅ No remediations needed — skipping PR"
           echo "remediation-count=0" >> $GITHUB_OUTPUT
+          report_status succeeded
           exit 0
         fi
 
@@ -115,6 +137,7 @@ runs:
         echo "  📄 Written to ${BASE_PATH}/remediation.tf"
 
         echo "remediation-count=$REMEDIATION_COUNT" >> $GITHUB_OUTPUT
+        report_status succeeded
 
     - name: Open remediation PR
       if: inputs.mode == 'remediation' && steps.remediation.outputs.remediation-count != '0'
